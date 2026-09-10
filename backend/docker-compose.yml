@@ -5,7 +5,10 @@ services:
       target: production
     env_file: .env
     environment:
+      # Inside the compose network the API talks to the container ports
+      # directly, so these override whatever .env says for host access.
       DB_HOST: postgres
+      DB_PORT: 5432
       REDIS_URL: redis://redis:6379
     ports:
       - "3000:3000"
@@ -23,7 +26,10 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:-poonsuk_dev_password}
       POSTGRES_DB: ${DB_NAME:-poonsuk}
     ports:
-      - "5432:5432"
+      # Host 5433 -> container 5432. 5432 on the host is taken by another
+      # PostgreSQL, so DB_PORT in .env must be 5433 when running the API
+      # from Windows.
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

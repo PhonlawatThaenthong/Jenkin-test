@@ -22,7 +22,9 @@ export class User {
   @Column({ length: 255 })
   email!: string;
 
-  @Column({ length: 30, nullable: true })
+  // The explicit type is required: `string | null` reflects as Object, which
+  // TypeORM cannot map to a Postgres column on its own.
+  @Column({ type: 'varchar', length: 30, nullable: true })
   phone!: string | null;
 
   /** bcrypt hash — never the plain password (unlike the Flutter mock model). */

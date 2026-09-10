@@ -6,7 +6,6 @@ Monorepo. Two independent applications side by side:
 mobile-app-final-project/
 ├── frontend/   Flutter app (flutter_bloc) — the mobile client
 ├── backend/    NestJS + PostgreSQL + TypeORM API
-└── docs/       Backend_Design_Poonsuk_Resort.docx (architecture design)
 ```
 
 ## frontend/

@@ -1,9 +1,12 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:hotel_booking/models/booking.dart';
 import 'package:hotel_booking/blocs/booking/booking_bloc.dart';
 import 'package:hotel_booking/blocs/booking/booking_event.dart';
+import 'package:hotel_booking/repositories/api/api_repositories.dart';
 import 'package:hotel_booking/repositories/mock/mock_booking_repository.dart';
 import 'package:hotel_booking/screens/auth/login_screen.dart';
 import 'package:hotel_booking/main.dart';
@@ -16,7 +19,16 @@ void main() {
     // No saved session in storage.
     SharedPreferences.setMockInitialValues({});
 
-    await tester.pumpWidget(const HotelBookingApp());
+    // The app now talks to the API on startup. A stub client keeps the test
+    // hermetic — no server, no sockets — and 401 is exactly what a real API
+    // answers a request carrying no token.
+    final offline = MockClient(
+      (request) async => http.Response('{"message":"Unauthorized"}', 401),
+    );
+
+    await tester.pumpWidget(
+      HotelBookingApp(apiClient: ApiClient(httpClient: offline)),
+    );
     // Let the async session restore complete (the splash spinner animates
     // forever, so we pump fixed frames rather than pumpAndSettle).
     await tester.pump();

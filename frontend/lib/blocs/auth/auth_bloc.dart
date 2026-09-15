@@ -1,5 +1,6 @@
 import 'package:flutter_bloc/flutter_bloc.dart';
 
+import '../../models/user.dart';
 import '../../repositories/auth_repository.dart';
 import '../../repositories/repository_exception.dart';
 import 'auth_event.dart';
@@ -23,24 +24,41 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
   final AuthRepository _repository;
 
   Future<void> _onStarted(AuthStarted event, Emitter<AuthState> emit) async {
+    AppUser? user;
     try {
-      final users = await _repository.listUsers();
-      final user = await _repository.restoreSession();
-      emit(state.copyWith(
-        initialised: true,
-        users: users,
-        currentUser: user,
-        clearCurrentUser: user == null,
-        status: user != null
-            ? AuthStatus.authenticated
-            : AuthStatus.unauthenticated,
-      ));
+      // Restored FIRST: with the HTTP repository `listUsers()` is a staff-only
+      // endpoint, so it needs the session this call re-establishes. Asking for
+      // the account list first would 401 and abort session restore, signing a
+      // returning user out on every launch.
+      user = await _repository.restoreSession();
     } on RepositoryException catch (e) {
       emit(state.copyWith(
         initialised: true,
         status: AuthStatus.unauthenticated,
         errorMessage: e.message,
       ));
+      return;
+    }
+
+    emit(state.copyWith(
+      initialised: true,
+      users: await _loadUsers(),
+      currentUser: user,
+      clearCurrentUser: user == null,
+      status: user != null
+          ? AuthStatus.authenticated
+          : AuthStatus.unauthenticated,
+    ));
+  }
+
+  /// The account list is back-office data. A customer (or a signed-out app) is
+  /// not entitled to it, and failing to read it must never cost the user their
+  /// session — so it degrades to an empty list instead of an error state.
+  Future<List<AppUser>> _loadUsers() async {
+    try {
+      return await _repository.listUsers();
+    } on RepositoryException {
+      return const [];
     }
   }
 
@@ -54,7 +72,13 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
         email: event.email,
         password: event.password,
       );
-      emit(state.copyWith(status: AuthStatus.authenticated, currentUser: user));
+      // Staff signing in can now read the account list that was unavailable
+      // before the token existed.
+      emit(state.copyWith(
+        status: AuthStatus.authenticated,
+        currentUser: user,
+        users: await _loadUsers(),
+      ));
     } on RepositoryException catch (e) {
       emit(state.copyWith(
         status: AuthStatus.failure,

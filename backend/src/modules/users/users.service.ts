@@ -1,16 +1,26 @@
-import { Injectable, ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable, BadRequestException, ConflictException, NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { QueryFailedError, Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { User, UserRole } from './user.entity';
 
 const BCRYPT_ROUNDS = 12;
+
+/** Postgres foreign_key_violation — the account still owns bookings. */
+const PG_FOREIGN_KEY_VIOLATION = '23503';
 
 @Injectable()
 export class UsersService {
   constructor(
     @InjectRepository(User) private readonly repo: Repository<User>,
   ) {}
+
+  /** `GET /api/staff/users` — ordered so the back-office list is stable. */
+  list(): Promise<User[]> {
+    return this.repo.find({ order: { role: 'ASC', name: 'ASC' } });
+  }
 
   findById(id: string): Promise<User | null> {
     return this.repo.findOne({ where: { id } });
@@ -45,6 +55,27 @@ export class UsersService {
     const user = await this.findById(id);
     if (!user) throw new NotFoundException('ไม่พบผู้ใช้');
     return user;
+  }
+
+  /**
+   * `DELETE /api/staff/users/:id`. An admin deleting their own account would
+   * lock the back-office out, and the booking FK is ON DELETE RESTRICT, so a
+   * customer with history cannot be erased either.
+   */
+  async remove(id: string, actorId: string): Promise<void> {
+    if (id === actorId) {
+      throw new BadRequestException('ลบบัญชีของตัวเองไม่ได้');
+    }
+    const user = await this.getOrFail(id);
+    try {
+      await this.repo.remove(user);
+    } catch (err) {
+      if (err instanceof QueryFailedError
+        && (err.driverError as { code?: string }).code === PG_FOREIGN_KEY_VIOLATION) {
+        throw new ConflictException('ลบไม่ได้: บัญชีนี้มีประวัติการจองอยู่');
+      }
+      throw err;
+    }
   }
 
   static verifyPassword(plain: string, hash: string): Promise<boolean> {

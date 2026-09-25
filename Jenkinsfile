@@ -78,7 +78,7 @@ pipeline {
                         cp .env.ci .env
                         docker compose up -d --build
                         for i in $(seq 1 30); do
-                          docker compose exec -T api wget -qO- http://localhost:3000/health/live && break
+                          docker compose exec -T api wget -qO- http://127.0.0.1:3000/health/live && break
                           sleep 2
                         done
                         docker compose exec -T api node node_modules/typeorm/cli.js migration:run -d dist/config/data-source.js

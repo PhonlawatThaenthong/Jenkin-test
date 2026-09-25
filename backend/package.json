@@ -50,6 +50,7 @@
     "@typescript-eslint/parser": "^8.70.1",
     "eslint": "^10.11.0",
     "jest": "^29.7.0",
+    "jest-junit": "^17.0.0",
     "supertest": "^7.0.0",
     "ts-jest": "^29.2.5",
     "ts-node": "^10.9.2",
@@ -66,6 +67,33 @@
     "transform": {
       "^.+\\.(t|j)s$": "ts-jest"
     },
-    "testEnvironment": "node"
-  }
+    "testEnvironment": "node",
+    "collectCoverageFrom": [
+      "**/*.ts",
+      "!main.ts",
+      "!migrations/**",
+      "!config/**",
+      "!**/*.module.ts",
+      "!**/dto/**",
+      "!**/*.entity.ts"
+    ],
+    "coverageDirectory": "../coverage",
+    "coverageReporters": [
+      "text-summary",
+      "lcov",
+      "cobertura"
+    ]
+  },
+  "jest-junit": {
+    "outputDirectory": "reports",
+    "outputName": "junit.xml"
+  },
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
 }

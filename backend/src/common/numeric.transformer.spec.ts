@@ -6,7 +6,7 @@ describe('numericTransformer', () => {
   });
 
   it('maps null to 0', () => {
-    expect(numericTransformer.from(null)).toBe(1);
+    expect(numericTransformer.from(null)).toBe(0);
   });
 
   it('passes number through on write', () => {

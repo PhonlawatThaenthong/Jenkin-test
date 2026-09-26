@@ -9,11 +9,30 @@ pipeline {
 
     options {
         // A hung npm install, image build or test run would hold the executor forever and
-        // block every queued build; a hard ceiling fails fast. 30 min covers build + Sonar + E2E.
-        timeout(time: 30, unit: 'MINUTES')
+        // block every queued build; a hard ceiling fails fast. 45 min covers security scans + build + Sonar + E2E.
+        timeout(time: 45, unit: 'MINUTES')
     }
 
     stages {
+        stage('Secrets Detection') {
+            agent {
+                docker {
+                    image 'zricethezav/gitleaks:latest'
+                    args '--entrypoint='
+                    reuseNode true
+                }
+            }
+            steps {
+                script { env.FAILED_STAGE = env.STAGE_NAME }
+                // Scans every commit reachable from this branch, not just the working tree.
+                sh '''
+                    mkdir -p reports
+                    gitleaks detect --source . --redact --verbose \
+                      --report-format sarif --report-path reports/gitleaks.sarif
+                '''
+            }
+            post { always { archiveArtifacts artifacts: 'reports/gitleaks.sarif', allowEmptyArchive: true } }
+        }
         stage('Install') {
             agent { docker { image 'node:20-alpine'; reuseNode true } }
             steps {
@@ -26,6 +45,111 @@ pipeline {
             steps {
                 script { env.FAILED_STAGE = env.STAGE_NAME }
                 dir('backend') { sh 'npm run lint' }
+            }
+        }
+        stage('SAST - ESLint') {
+            agent { docker { image 'node:20-alpine'; reuseNode true } }
+            steps {
+                script { env.FAILED_STAGE = env.STAGE_NAME }
+                dir('backend') {
+                    sh '''
+                        mkdir -p reports
+                        npx eslint src/ -f @microsoft/eslint-formatter-sarif -o reports/eslint.sarif
+                    '''
+                }
+            }
+            post { always { archiveArtifacts artifacts: 'backend/reports/eslint.sarif', allowEmptyArchive: true } }
+        }
+        stage('SAST - Semgrep') {
+            agent {
+                docker {
+                    image 'semgrep/semgrep:latest'
+                    args '--entrypoint='
+                    reuseNode true
+                }
+            }
+            steps {
+                script { env.FAILED_STAGE = env.STAGE_NAME }
+                sh '''
+                    mkdir -p reports
+                    HOME=/tmp semgrep scan --config=p/owasp-top-ten --config=p/nodejs \
+                      --sarif --output reports/semgrep.sarif backend/src
+                '''
+            }
+            post { always { archiveArtifacts artifacts: 'reports/semgrep.sarif', allowEmptyArchive: true } }
+        }
+        stage('SCA - npm audit') {
+            agent { docker { image 'node:20-alpine'; reuseNode true } }
+            steps {
+                script { env.FAILED_STAGE = env.STAGE_NAME }
+                dir('backend') {
+                    script {
+                        sh 'mkdir -p reports && npm audit --audit-level=high --json > reports/audit.json || true'
+                        def critical = sh(
+                            script: "node -p \"require('./reports/audit.json').metadata.vulnerabilities.critical\"",
+                            returnStdout: true
+                        ).trim().toInteger()
+                        def high = sh(
+                            script: "node -p \"require('./reports/audit.json').metadata.vulnerabilities.high\"",
+                            returnStdout: true
+                        ).trim().toInteger()
+                        if (critical > 0) {
+                            // Mark the stage red but keep going, so SBOM and the Policy Gate still
+                            // run and the policy is the step that actually blocks the release.
+                            catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                                error("Blocking: ${critical} critical vulnerabilities found")
+                            }
+                        } else if (high > 0) {
+                            echo "SCA WARNING: ${high} high vulnerabilities (allowed: threshold blocks only on critical)"
+                        } else {
+                            echo 'SCA passed with 0 critical and 0 high vulnerabilities'
+                        }
+                    }
+                }
+            }
+            post { always { archiveArtifacts artifacts: 'backend/reports/audit.json', allowEmptyArchive: true } }
+        }
+        stage('Generate SBOM') {
+            steps {
+                script { env.FAILED_STAGE = env.STAGE_NAME }
+                // syft and cosign images have no shell, so run them with plain `docker run`
+                // sharing Jenkins' volumes instead of as a docker agent.
+                sh '''
+                    mkdir -p reports
+                    docker run --rm --volumes-from "$(hostname)" -w "$WORKSPACE" -u "$(id -u):$(id -g)" -e HOME="$WORKSPACE" \
+                      anchore/syft:latest dir:backend \
+                      --source-name taskflow-api -o cyclonedx-json=reports/taskflow-api.cdx.json
+                '''
+                withCredentials([file(credentialsId: 'cosign-key', variable: 'COSIGN_KEY'),
+                                 string(credentialsId: 'cosign-password', variable: 'COSIGN_PASSWORD')]) {
+                    sh '''
+                        docker run --rm --volumes-from "$(hostname)" -w "$WORKSPACE" -u "$(id -u):$(id -g)" -e HOME="$WORKSPACE" \
+                          -e COSIGN_PASSWORD gcr.io/projectsigstore/cosign:v2.4.1 \
+                          sign-blob --yes --tlog-upload=false --key "$COSIGN_KEY" \
+                          --output-signature reports/taskflow-api.cdx.json.sig reports/taskflow-api.cdx.json
+                        docker run --rm --volumes-from "$(hostname)" -w "$WORKSPACE" -u "$(id -u):$(id -g)" -e HOME="$WORKSPACE" \
+                          gcr.io/projectsigstore/cosign:v2.4.1 \
+                          verify-blob --insecure-ignore-tlog=true --key policy/cosign.pub \
+                          --signature reports/taskflow-api.cdx.json.sig reports/taskflow-api.cdx.json
+                    '''
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/taskflow-api.cdx.json, reports/taskflow-api.cdx.json.sig',
+                                     allowEmptyArchive: true
+                }
+            }
+        }
+        stage('Policy Gate') {
+            steps {
+                script { env.FAILED_STAGE = env.STAGE_NAME }
+                // --fail-defined: exit 1 when any deny message exists, which fails this stage.
+                sh '''
+                    docker run --rm --volumes-from "$(hostname)" -w "$WORKSPACE" -u "$(id -u):$(id -g)" -e HOME="$WORKSPACE" \
+                      openpolicyagent/opa:latest eval --fail-defined --format pretty \
+                      -d policy/security.rego -i backend/reports/audit.json 'data.security.deny[msg]'
+                '''
             }
         }
         stage('Unit Test') {

@@ -1,8 +1,10 @@
 // ESLint v9+/v10 flat config (แทน .eslintrc.* แบบเก่า)
 import tsParser from '@typescript-eslint/parser';
 import tsPlugin from '@typescript-eslint/eslint-plugin';
+import security from 'eslint-plugin-security';
 
 export default [
+  security.configs.recommended,
   {
     ignores: ['dist/**', 'node_modules/**', 'coverage/**'],
   },

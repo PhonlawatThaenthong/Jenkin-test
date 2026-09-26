@@ -7,3 +7,7 @@
 .claude/
 *.docx
 .env
+
+# Lab 06 security reports and signing key (never commit the private key)
+reports/
+policy/cosign.key

@@ -3,3 +3,7 @@ dist
 .env
 .git
 *.log
+coverage
+reports
+e2e
+.scannerwork

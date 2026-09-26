@@ -5,12 +5,18 @@ pipeline {
         APP_NAME = 'taskflow-api'
         NODE_ENV = 'test'
         COMPOSE_PROJECT_NAME = 'taskflow-ci'
+        REGISTRY = 'localhost:5001'
+    }
+
+    parameters {
+        booleanParam(name: 'SIMULATE_BROKEN', defaultValue: false,
+                     description: 'Lab 07: deploy a tag that does not exist, to prove the automatic rollback')
     }
 
     options {
         // A hung npm install, image build or test run would hold the executor forever and
-        // block every queued build; a hard ceiling fails fast. 45 min covers security scans + build + Sonar + E2E.
-        timeout(time: 45, unit: 'MINUTES')
+        // block every queued build; a hard ceiling fails fast. 60 min covers security scans, Sonar, E2E, image scan and deploy.
+        timeout(time: 60, unit: 'MINUTES')
     }
 
     stages {
@@ -236,6 +242,76 @@ pipeline {
                                          reportName: 'Playwright Report', keepAll: true,
                                          alwaysLinkToLastBuild: true, allowMissing: true])
                 }
+            }
+        }
+        stage('Build Image') {
+            steps {
+                script {
+                    env.FAILED_STAGE = env.STAGE_NAME
+                    // Immutable tag from the commit, never :latest.
+                    env.IMAGE = "${env.REGISTRY}/taskflow-api:${env.GIT_COMMIT.take(7)}"
+                }
+                sh '''
+                    docker build --target production -t "$IMAGE" backend
+                    docker push "$IMAGE"
+                '''
+            }
+        }
+        stage('Container Scan') {
+            steps {
+                script { env.FAILED_STAGE = env.STAGE_NAME }
+                sh '''
+                    mkdir -p reports
+                    TRIVY="docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache/ aquasec/trivy:latest"
+                    # Human-readable table in the console (never fails)...
+                    $TRIVY image --severity HIGH,CRITICAL --ignore-unfixed "$IMAGE"
+                    # ...then the gate: SARIF to a file, exit 1 on any fixable HIGH/CRITICAL.
+                    $TRIVY image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
+                      --format sarif "$IMAGE" > reports/trivy.sarif
+                '''
+            }
+            post { always { archiveArtifacts artifacts: 'reports/trivy.sarif', allowEmptyArchive: true } }
+        }
+        stage('Blue/Green Deploy') {
+            when { not { changeRequest() } }
+            steps {
+                script { env.FAILED_STAGE = env.STAGE_NAME }
+                withCredentials([file(credentialsId: 'kubeconfig-kind', variable: 'KUBECONFIG')]) {
+                    script {
+                        env.BG_CURRENT = sh(
+                            script: "kubectl get svc taskflow -o jsonpath='{.spec.selector.color}'",
+                            returnStdout: true
+                        ).trim()
+                        env.BG_NEXT = env.BG_CURRENT == 'blue' ? 'green' : 'blue'
+                        def target = params.SIMULATE_BROKEN ? "${env.IMAGE}-broken" : env.IMAGE
+                        sh 'mkdir -p reports && kubectl get svc taskflow -o yaml > reports/svc-before.yaml'
+
+                        sh "kubectl set image deployment/taskflow-${env.BG_NEXT} app=${target}"
+                        sh "kubectl rollout status deployment/taskflow-${env.BG_NEXT} --timeout=120s"
+
+                        // Smoke test the new pods directly, bypassing the user-facing Service.
+                        sh "kubectl run smoke-${env.BUILD_NUMBER} --rm -i --restart=Never --image=curlimages/curl -- curl -sf http://taskflow-${env.BG_NEXT}:8080/health/live"
+
+                        sh "kubectl patch svc taskflow -p '{\"spec\":{\"selector\":{\"color\":\"${env.BG_NEXT}\"}}}'"
+                        sh 'kubectl get svc taskflow -o yaml > reports/svc-after.yaml'
+                        echo "Switched traffic from ${env.BG_CURRENT} to ${env.BG_NEXT}"
+                    }
+                }
+            }
+            post {
+                failure {
+                    withCredentials([file(credentialsId: 'kubeconfig-kind', variable: 'KUBECONFIG')]) {
+                        script {
+                            if (env.BG_CURRENT) {
+                                echo "ROLLBACK: pointing Service taskflow back to ${env.BG_CURRENT}"
+                                sh "kubectl patch svc taskflow -p '{\"spec\":{\"selector\":{\"color\":\"${env.BG_CURRENT}\"}}}'"
+                                sh "kubectl rollout undo deployment/taskflow-${env.BG_NEXT} || true"
+                                sh 'kubectl get svc taskflow -o yaml > reports/svc-after-rollback.yaml'
+                            }
+                        }
+                    }
+                }
+                always { archiveArtifacts artifacts: 'reports/svc-*.yaml', allowEmptyArchive: true }
             }
         }
         stage('Deploy - Staging') {

@@ -1,0 +1,81 @@
+// Lab 09: taskflow-api CI stages on an ephemeral Kubernetes pod (kind cluster).
+// A fresh pod is created per build and deleted afterwards. The Docker-dependent
+// stages (E2E compose, image build, Trivy, blue/green) stay in the root Jenkinsfile,
+// because a plain pod has no Docker daemon.
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: taskflow-ci
+spec:
+  containers:
+  - name: node
+    image: node:20-alpine
+    command: ['cat']
+    tty: true
+    resources:
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        memory: 2Gi
+'''
+        }
+    }
+
+    parameters {
+        booleanParam(name: 'SIMULATE_FAILURE', defaultValue: false,
+                     description: 'Fail on purpose to burn the pipeline SLO error budget (alert drill)')
+    }
+
+    options {
+        timeout(time: 20, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '50'))
+    }
+
+    stages {
+        stage('Agent Info') {
+            steps {
+                container('node') {
+                    sh 'echo "running in pod: $(hostname)"; node --version; npm --version'
+                }
+            }
+        }
+        stage('Install') {
+            steps {
+                container('node') { dir('backend') { sh 'npm ci' } }
+            }
+        }
+        stage('Lint') {
+            steps {
+                container('node') { dir('backend') { sh 'npm run lint' } }
+            }
+        }
+        stage('Unit Test') {
+            steps {
+                container('node') {
+                    dir('backend') {
+                        sh 'npm test -- --coverage --reporters=default --reporters=jest-junit'
+                    }
+                }
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: 'backend/reports/junit.xml'
+                    recordCoverage(tools: [[parser: 'COBERTURA',
+                                            pattern: 'backend/coverage/cobertura-coverage.xml']])
+                }
+            }
+        }
+        stage('Simulated Failure') {
+            when { expression { params.SIMULATE_FAILURE } }
+            steps {
+                error 'SIMULATE_FAILURE=true: failing on purpose for the SLO alert drill'
+            }
+        }
+    }
+}

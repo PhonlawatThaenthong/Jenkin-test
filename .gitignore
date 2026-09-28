@@ -19,3 +19,6 @@ policy/cosign.key
 infra/terraform/tfplan
 infra/terraform/tfplan.txt
 infra/ansible/ansible_ed25519
+
+# Lab 09: kubeconfig for the Jenkins Kubernetes cloud (never commit)
+*.kubeconfig

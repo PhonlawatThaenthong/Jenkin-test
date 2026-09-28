@@ -17,12 +17,15 @@ spec:
     image: node:20-alpine
     command: ['cat']
     tty: true
+    env:
+    - name: NODE_OPTIONS
+      value: --max-old-space-size=1024
     resources:
       requests:
         cpu: 500m
-        memory: 512Mi
+        memory: 1Gi
       limits:
-        memory: 2Gi
+        memory: 3Gi
 '''
         }
     }
@@ -59,7 +62,9 @@ spec:
             steps {
                 container('node') {
                     dir('backend') {
-                        sh 'npm test -- --coverage --reporters=default --reporters=jest-junit'
+                        // Jest defaults to (CPU cores - 1) workers, each with its own ts-jest compiler;
+                        // inside a pod that sees every host core this exceeded the memory limit (OOMKilled).
+                        sh 'npm test -- --coverage --maxWorkers=2 --reporters=default --reporters=jest-junit'
                     }
                 }
             }

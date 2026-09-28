@@ -2,15 +2,22 @@
 #   SLI : share of finished builds that succeed (success / (success + failed))
 #   SLO : >= 90% over a rolling 30 min window (lab-sized; production would use 7d or 28d)
 #   Error budget : 10% of builds may fail
-# The metric names differ slightly between Prometheus-plugin versions (some add _total),
-# so the selectors match both spellings.
+# Counters used: default_jenkins_builds_{success,aborted,total}_build_count_total (the _total suffix
+# is optional in the selectors so older plugin versions also match). Aborted builds are excluded.
 groups:
   - name: taskflow-pipeline-slo
     rules:
       - record: taskflow:builds_success:increase30m
-        expr: sum(increase({__name__=~"default_jenkins_builds_success_build_count(_total)?", jenkins_job="taskflow-k8s"}[30m]))
+        expr: max(increase({__name__=~"default_jenkins_builds_success_build_count(_total)?", jenkins_job="taskflow-k8s"}[30m])) or vector(0)
+      - record: taskflow:builds_aborted:increase30m
+        expr: max(increase({__name__=~"default_jenkins_builds_aborted_build_count(_total)?", jenkins_job="taskflow-k8s"}[30m])) or vector(0)
+      - record: taskflow:builds_total:increase30m
+        expr: max(increase({__name__=~"default_jenkins_builds_total_build_count(_total)?", jenkins_job="taskflow-k8s"}[30m])) or vector(0)
+      # Failed (plus unstable/not-built) = total - success - aborted. Derived this way because the
+      # plugin only creates the failed counter after the first failure, and increase() ignores
+      # the first sample of a new series.
       - record: taskflow:builds_failed:increase30m
-        expr: sum(increase({__name__=~"default_jenkins_builds_failed_build_count(_total)?", jenkins_job="taskflow-k8s"}[30m]))
+        expr: clamp_min(taskflow:builds_total:increase30m - taskflow:builds_success:increase30m - taskflow:builds_aborted:increase30m, 0)
       - record: taskflow:build_success_ratio:30m
         expr: taskflow:builds_success:increase30m / (taskflow:builds_success:increase30m + taskflow:builds_failed:increase30m)
       - record: taskflow:error_budget_remaining:30m
@@ -19,7 +26,7 @@ groups:
       - alert: TaskflowPipelineSLOBreach
         expr: |
           taskflow:build_success_ratio:30m < 0.90
-          and (taskflow:builds_success:increase30m + taskflow:builds_failed:increase30m) >= 3
+          and (taskflow:builds_success:increase30m + taskflow:builds_failed:increase30m) >= 2
         for: 1m
         labels:
           severity: page

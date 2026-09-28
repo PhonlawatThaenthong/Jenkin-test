@@ -59,8 +59,11 @@ resource "aws_instance" "app" {
   }
 
   # FIX tfsec aws-ec2-enable-at-rest-encryption / checkov CKV_AWS_8.
+  # LocalStack's RunInstances needs an explicit size once a block device is described.
   root_block_device {
-    encrypted = true
+    encrypted   = true
+    volume_size = 8
+    volume_type = "gp3"
   }
 
   tags = {

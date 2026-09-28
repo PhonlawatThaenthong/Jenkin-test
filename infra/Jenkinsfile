@@ -1,0 +1,201 @@
+// Lab 08: Infrastructure as Code pipeline for taskflow-api.
+// Runs as its own Jenkins Pipeline job (Script Path: infra/Jenkinsfile), so that
+// infrastructure changes are planned and approved separately from app builds.
+pipeline {
+    agent any
+
+    options {
+        timeout(time: 60, unit: 'MINUTES')
+        disableConcurrentBuilds()   // two applies against one state file must never overlap
+    }
+
+    parameters {
+        choice(name: 'ACTION', choices: ['apply', 'destroy'],
+               description: 'apply = create/update the environment, destroy = tear it all down')
+        string(name: 'TASKFLOW_IMAGE', defaultValue: 'localhost:5001/taskflow-api:bootstrap',
+               description: 'Image (built in Lab 07) that Ansible pulls onto the host')
+    }
+
+    environment {
+        // LocalStack accepts any credentials; real ones would come from a Jenkins credential.
+        AWS_ACCESS_KEY_ID     = 'test'
+        AWS_SECRET_ACCESS_KEY = 'test'
+        AWS_DEFAULT_REGION    = 'us-east-1'
+        TF_IN_AUTOMATION      = '1'
+        TF_DIR                = 'infra/terraform'
+    }
+
+    stages {
+        stage('IaC Lint & Validate') {
+            parallel {
+                stage('Terraform Validate') {
+                    agent {
+                        docker {
+                            image 'hashicorp/terraform:1.9.8'
+                            args '--entrypoint= -e HOME=/tmp'
+                            reuseNode true
+                        }
+                    }
+                    steps {
+                        dir('infra/terraform') {
+                            sh 'terraform init -backend=false -input=false'
+                            sh 'terraform validate'
+                            sh 'terraform fmt -check -recursive'
+                        }
+                    }
+                }
+                stage('Ansible Lint') {
+                    agent {
+                        dockerfile {
+                            dir 'infra/ci'
+                            filename 'Dockerfile.ansible'
+                            args '-e HOME=/tmp'
+                            reuseNode true
+                        }
+                    }
+                    steps { sh 'ansible-lint infra/ansible/playbook.yml' }
+                }
+            }
+        }
+
+        stage('IaC Security Scan') {
+            steps {
+                // Run both scanners, keep both reports, then fail if either found something.
+                sh '''
+                    mkdir -p reports
+                    RUN="docker run --rm --volumes-from $(hostname) -w $WORKSPACE -u $(id -u):$(id -g) -e HOME=/tmp"
+                    rc=0
+                    $RUN aquasec/tfsec:latest "$TF_DIR" --no-color || rc=1
+                    $RUN aquasec/tfsec:latest "$TF_DIR" --no-color --soft-fail \
+                        --format sarif --out reports/tfsec.sarif
+                    $RUN bridgecrew/checkov:latest -d "$TF_DIR" --framework terraform --compact \
+                        -o cli -o sarif --output-file-path console,reports || rc=1
+                    exit $rc
+                '''
+            }
+            post {
+                always { archiveArtifacts artifacts: 'reports/tfsec.sarif, reports/results_sarif.sarif', allowEmptyArchive: true }
+            }
+        }
+
+        stage('Terraform Plan') {
+            agent {
+                docker {
+                    image 'hashicorp/terraform:1.9.8'
+                    args '--entrypoint= -e HOME=/tmp --network iac-net -v /var/run/docker.sock:/var/run/docker.sock'
+                    reuseNode true
+                }
+            }
+            steps {
+                dir('infra/terraform') {
+                    sh 'terraform init -input=false'
+                    script {
+                        def destroyFlag = params.ACTION == 'destroy' ? '-destroy' : ''
+                        sh "terraform plan -input=false ${destroyFlag} -out=tfplan"
+                    }
+                    sh 'terraform show -no-color tfplan > tfplan.txt'
+                }
+            }
+            post {
+                always { archiveArtifacts artifacts: 'infra/terraform/tfplan, infra/terraform/tfplan.txt', allowEmptyArchive: true }
+            }
+        }
+
+        stage('Approval') {
+            steps {
+                script {
+                    def plan = readFile('infra/terraform/tfplan.txt').readLines()
+                    def changes = plan.findAll { it.startsWith('  # ') || it.startsWith('Plan:') }
+                    def summary = changes ? changes.join('\n') : 'No changes.'
+                    echo "Plan summary for ${params.ACTION}:\n${summary}"
+                    timeout(time: 30, unit: 'MINUTES') {
+                        input message: "Terraform ${params.ACTION.toUpperCase()} - review the plan:\n\n${summary}\n\nFull plan: tfplan.txt in Build Artifacts",
+                              ok: "Yes, ${params.ACTION}"
+                    }
+                }
+            }
+        }
+
+        stage('Terraform Apply') {
+            agent {
+                docker {
+                    image 'hashicorp/terraform:1.9.8'
+                    args '--entrypoint= -e HOME=/tmp --network iac-net -v /var/run/docker.sock:/var/run/docker.sock'
+                    reuseNode true
+                }
+            }
+            steps {
+                dir('infra/terraform') {
+                    // Applies exactly the plan that was approved, nothing re-computed.
+                    sh 'terraform apply -input=false tfplan'
+                    sh 'mkdir -p ../../reports && terraform output -json > ../../reports/tf-outputs.json'
+                    sh 'terraform output'
+                }
+            }
+            post {
+                always { archiveArtifacts artifacts: 'reports/tf-outputs.json', allowEmptyArchive: true }
+            }
+        }
+
+        stage('Configure with Ansible') {
+            when { expression { params.ACTION == 'apply' } }
+            agent {
+                dockerfile {
+                    dir 'infra/ci'
+                    filename 'Dockerfile.ansible'
+                    args '--network iac-net -e HOME=/tmp'
+                    reuseNode true
+                }
+            }
+            environment {
+                ANSIBLE_HOST_KEY_CHECKING = 'False'
+                IMAGE = "${params.TASKFLOW_IMAGE}"
+            }
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: 'ansible-ssh',
+                                                   keyFileVariable: 'SSH_KEY',
+                                                   usernameVariable: 'SSH_USER')]) {
+                    // Dynamic inventory built from the Terraform output, not a hand-written host list.
+                    sh '''
+                        ADDR=$(python3 -c "import json; print(json.load(open('reports/tf-outputs.json'))['instance_address']['value'])")
+                        printf '[taskflow]\\n%s ansible_user=%s ansible_ssh_private_key_file=%s ansible_python_interpreter=/usr/bin/python3\\n' \
+                            "$ADDR" "$SSH_USER" "$SSH_KEY" > reports/inventory.ini
+                        cat reports/inventory.ini
+                        for i in $(seq 1 10); do
+                            ansible -i reports/inventory.ini taskflow -m ansible.builtin.ping && break
+                            sleep 3
+                        done
+                        ansible-playbook -i reports/inventory.ini infra/ansible/playbook.yml
+                    '''
+                }
+            }
+        }
+
+        stage('Verify Destroy') {
+            when { expression { params.ACTION == 'destroy' } }
+            agent {
+                docker {
+                    image 'hashicorp/terraform:1.9.8'
+                    args '--entrypoint= -e HOME=/tmp --network iac-net'
+                    reuseNode true
+                }
+            }
+            steps {
+                dir('infra/terraform') {
+                    sh '''
+                        LEFT=$(terraform state list | wc -l)
+                        echo "Resources still in state: $LEFT"
+                        test "$LEFT" -eq 0
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success { echo "Infrastructure ${params.ACTION} finished." }
+        always {
+            archiveArtifacts artifacts: 'reports/inventory.ini', allowEmptyArchive: true
+        }
+    }
+}

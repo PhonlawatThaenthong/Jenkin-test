@@ -4,3 +4,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends openssh-client \
  && rm -rf /var/lib/apt/lists/* \
  && pip install --no-cache-dir "ansible>=10,<12" ansible-lint
+
+# Jenkins runs this agent as -u 1000:1000; ssh aborts ("No user exists for uid 1000")
+# unless that uid has a passwd entry.
+RUN groupadd -g 1000 jenkins \
+ && useradd -u 1000 -g 1000 -m -d /home/jenkins -s /bin/bash jenkins

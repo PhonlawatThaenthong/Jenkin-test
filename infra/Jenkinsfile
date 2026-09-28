@@ -36,6 +36,7 @@ pipeline {
                             reuseNode true
                         }
                     }
+                    environment { TF_DATA_DIR = '.terraform-validate' }
                     steps {
                         dir('infra/terraform') {
                             sh 'terraform init -backend=false -input=false'

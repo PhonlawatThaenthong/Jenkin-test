@@ -45,11 +45,11 @@ resource "aws_iam_instance_profile" "app" {
 }
 
 resource "aws_instance" "app" {
+  # checkov:skip=CKV_AWS_126:LocalStack does not implement MonitorInstances; enable detailed monitoring on real AWS
   ami                    = var.ami_id
   instance_type          = var.instance_type
   vpc_security_group_ids = [aws_security_group.app.id]
   iam_instance_profile   = aws_iam_instance_profile.app.name
-  monitoring             = true # FIX checkov CKV_AWS_126
   ebs_optimized          = true # FIX checkov CKV_AWS_135
 
   # FIX tfsec aws-ec2-enforce-http-token-imds / checkov CKV_AWS_79: IMDSv2 only.

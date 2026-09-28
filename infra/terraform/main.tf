@@ -1,30 +1,67 @@
-# Lab 08 step 3: this first version is INSECURE ON PURPOSE so that tfsec and
-# checkov have real findings to report. The fixed version replaces the two
-# aws_* resources below.
+# Lab 08 step 3: fixed after triaging tfsec and checkov (replaces the insecure first version).
 
 resource "aws_security_group" "app" {
   name        = "taskflow-app"
   description = "Security group for the taskflow-api host"
 
+  # FIX tfsec aws-ec2-no-public-ingress-sgr: only the internal network reaches 8080.
+  # FIX tfsec aws-ec2-add-description-to-security-group-rule / checkov CKV_AWS_23.
   ingress {
+    description = "taskflow-api HTTP from the internal network only"
     from_port   = 8080
     to_port     = 8080
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [var.allowed_cidr]
   }
 
+  # FIX checkov CKV_AWS_382: no more "all protocols, all ports" egress; HTTPS only.
+  # tfsec:ignore:aws-ec2-no-public-egress-sgr Accepted risk: the host must reach public package mirrors and registries over HTTPS.
   egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
+    description = "HTTPS out for OS packages and container images"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+}
+
+# FIX checkov CKV2_AWS_41: the instance gets its own least-privilege role.
+resource "aws_iam_role" "app" {
+  name = "taskflow-app"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ec2.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_instance_profile" "app" {
+  name = "taskflow-app"
+  role = aws_iam_role.app.name
 }
 
 resource "aws_instance" "app" {
   ami                    = var.ami_id
   instance_type          = var.instance_type
   vpc_security_group_ids = [aws_security_group.app.id]
+  iam_instance_profile   = aws_iam_instance_profile.app.name
+  monitoring             = true # FIX checkov CKV_AWS_126
+  ebs_optimized          = true # FIX checkov CKV_AWS_135
+
+  # FIX tfsec aws-ec2-enforce-http-token-imds / checkov CKV_AWS_79: IMDSv2 only.
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+  }
+
+  # FIX tfsec aws-ec2-enable-at-rest-encryption / checkov CKV_AWS_8.
+  root_block_device {
+    encrypted = true
+  }
 
   tags = {
     Name = "taskflow-app"

@@ -61,6 +61,20 @@ pipeline {
                             sh 'echo "pod: $(hostname)"'
                             dir('backend') { sh 'npm ci' }
                         }
+                        // Install syft, cosign and opa once here: running apk/curl installs from two
+                        // parallel branches in the same container fails on the apk database lock.
+                        container('supplychain') {
+                            sh '''
+                                apk add --no-cache curl >/dev/null
+                                curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+                                curl -sSfL -o /usr/local/bin/cosign \
+                                  https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
+                                curl -sSfL -o /usr/local/bin/opa \
+                                  https://openpolicyagent.org/downloads/v0.70.0/opa_linux_amd64_static
+                                chmod +x /usr/local/bin/cosign /usr/local/bin/opa
+                                syft version | head -2; cosign version 2>/dev/null | grep GitVersion; opa version | head -1
+                            '''
+                        }
                     }
                 }
 
@@ -159,11 +173,6 @@ pipeline {
                             steps {
                                 container('supplychain') {
                                     sh '''
-                                        apk add --no-cache curl >/dev/null
-                                        curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
-                                        curl -sSfL -o /usr/local/bin/cosign \
-                                          https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
-                                        chmod +x /usr/local/bin/cosign
                                         mkdir -p reports
                                         syft dir:backend --source-name taskflow-api -o cyclonedx-json=reports/taskflow-api.cdx.json
                                     '''
@@ -174,6 +183,9 @@ pipeline {
                                               --output-signature reports/taskflow-api.cdx.json.sig reports/taskflow-api.cdx.json
                                             cosign verify-blob --insecure-ignore-tlog=true --key policy/cosign.pub \
                                               --signature reports/taskflow-api.cdx.json.sig reports/taskflow-api.cdx.json
+                                            # cosign writes the signature as 0600 root; make it readable for the
+                                            # jnlp container (uid 1000) or archiveArtifacts cannot copy it.
+                                            chmod a+r reports/taskflow-api.cdx.json reports/taskflow-api.cdx.json.sig
                                         '''
                                     }
                                 }
@@ -189,10 +201,6 @@ pipeline {
                             steps {
                                 container('supplychain') {
                                     sh '''
-                                        apk add --no-cache curl >/dev/null
-                                        curl -sSfL -o /usr/local/bin/opa \
-                                          https://openpolicyagent.org/downloads/v0.70.0/opa_linux_amd64_static
-                                        chmod +x /usr/local/bin/opa
                                         opa eval --fail-defined --format pretty \
                                           -d policy/security.rego -i backend/reports/audit.json 'data.security.deny[msg]'
                                     '''

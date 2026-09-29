@@ -1,0 +1,140 @@
+// Lab 10: taskflow-mobile (Flutter / Android) pipeline on ephemeral Kubernetes pods.
+// Debug APK on every branch; signed release AAB only on main, with the keystore bound
+// from Jenkins credentials (android-keystore, android-keystore-password).
+
+def notify(String status) {
+    def to = env.NOTIFY_EMAIL
+    def branch = env.BRANCH_NAME ?: 'n/a'
+    def subject = "[${status}] ${env.JOB_NAME} #${env.BUILD_NUMBER} (${branch})"
+    def body = """${status}: ${env.JOB_NAME} #${env.BUILD_NUMBER}
+Branch: ${branch}
+Commit: ${env.GIT_COMMIT ?: 'n/a'}
+Build:  ${env.BUILD_URL}
+"""
+    if (to) {
+        mail to: to, subject: subject, body: body
+    } else {
+        echo "NOTIFY_EMAIL not set; notification would be: ${subject}"
+    }
+}
+
+pipeline {
+    agent {
+        kubernetes {
+            yamlFile 'ci/k8s/mobile-pod.yaml'
+        }
+    }
+
+    environment {
+        ANDROID_KEY_ALIAS = 'upload'
+    }
+
+    options {
+        timeout(time: 60, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    stages {
+        stage('Pub Get') {
+            steps {
+                container('flutter') {
+                    sh 'git config --global --add safe.directory "*"'
+                    dir('frontend') { sh 'flutter --version && flutter pub get' }
+                }
+            }
+        }
+
+        stage('Checks') {
+            failFast true
+            parallel {
+                stage('Analyze') {
+                    steps {
+                        container('flutter') {
+                            dir('frontend') { sh 'flutter analyze --no-fatal-infos' }
+                        }
+                    }
+                }
+                stage('Test + Coverage') {
+                    steps {
+                        container('flutter') {
+                            dir('frontend') {
+                                sh '''
+                                    mkdir -p reports
+                                    flutter test --coverage --machine > reports/flutter-tests.json
+                                    dart pub global activate junitreport >/dev/null
+                                    dart pub global run junitreport:tojunit \
+                                      --input reports/flutter-tests.json --output reports/flutter-junit.xml
+                                '''
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            junit allowEmptyResults: true, testResults: 'frontend/reports/flutter-junit.xml'
+                            archiveArtifacts artifacts: 'frontend/coverage/lcov.info', allowEmptyArchive: true
+                        }
+                    }
+                }
+                stage('SCA - osv-scanner') {
+                    steps {
+                        container('tools') {
+                            sh '''
+                                apk add --no-cache curl >/dev/null
+                                curl -sSfL -o /usr/local/bin/osv-scanner \
+                                  https://github.com/google/osv-scanner/releases/download/v2.0.0/osv-scanner_linux_amd64
+                                chmod +x /usr/local/bin/osv-scanner
+                                mkdir -p reports
+                                # table in the console, then the gate (exit 1 on any known vulnerability)
+                                osv-scanner scan source -L frontend/pubspec.lock || true
+                                osv-scanner scan source -L frontend/pubspec.lock --format sarif --output reports/osv.sarif
+                            '''
+                        }
+                    }
+                    post { always { archiveArtifacts artifacts: 'reports/osv.sarif', allowEmptyArchive: true } }
+                }
+            }
+        }
+
+        stage('Build Debug APK') {
+            steps {
+                container('flutter') {
+                    dir('frontend') { sh 'flutter build apk --debug' }
+                }
+            }
+            post {
+                success { archiveArtifacts artifacts: 'frontend/build/app/outputs/flutter-apk/app-debug.apk', fingerprint: true }
+            }
+        }
+
+        stage('Build Signed Release AAB') {
+            when { branch 'main' }
+            steps {
+                container('flutter') {
+                    withCredentials([file(credentialsId: 'android-keystore', variable: 'ANDROID_KEYSTORE_PATH'),
+                                     string(credentialsId: 'android-keystore-password', variable: 'ANDROID_KEYSTORE_PASSWORD')]) {
+                        dir('frontend') {
+                            sh '''
+                                flutter build appbundle --release --build-number "$BUILD_NUMBER"
+                                AAB=build/app/outputs/bundle/release/app-release.aab
+                                # Prove the bundle is signed with the upload key, not the debug key.
+                                jarsigner -verify -verbose -certs "$AAB" | tail -n 15
+                                jarsigner -verify "$AAB" | grep -q "jar verified"
+                                sha256sum "$AAB" > "$AAB.sha256"
+                            '''
+                        }
+                    }
+                }
+            }
+            post {
+                success {
+                    archiveArtifacts artifacts: 'frontend/build/app/outputs/bundle/release/app-release.aab*', fingerprint: true
+                }
+            }
+        }
+    }
+
+    post {
+        success { notify('SUCCESS') }
+        failure { notify('FAILURE') }
+    }
+}

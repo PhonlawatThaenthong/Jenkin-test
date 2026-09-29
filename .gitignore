@@ -22,3 +22,8 @@ infra/ansible/ansible_ed25519
 
 # Lab 09: kubeconfig for the Jenkins Kubernetes cloud (never commit)
 *.kubeconfig
+
+# Lab 10: Android signing material (bound from Jenkins credentials, never committed)
+*.jks
+*.keystore
+key.properties

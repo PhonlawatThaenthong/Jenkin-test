@@ -1,0 +1,96 @@
+# Lab 10: one ephemeral pod per taskflow-api build (Kubernetes plugin, cloud "kind").
+# Every tool runs in its own container and they share the workspace, so parallel
+# stages run side by side without any static, hand-provisioned container.
+# No secret values here: DB credentials come from the Kubernetes Secret taskflow-ci-env.
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: taskflow-api-ci
+spec:
+  containers:
+  - name: node
+    image: node:20-alpine
+    command: ['cat']
+    tty: true
+    env:
+    - name: NODE_OPTIONS
+      value: --max-old-space-size=1024
+    envFrom:
+    - secretRef:
+        name: taskflow-ci-env
+    resources:
+      requests: { cpu: 500m, memory: 1Gi }
+      limits: { memory: 3Gi }
+  # E2E database, reachable on 127.0.0.1:5432 because containers in a pod share the network.
+  - name: postgres
+    image: postgres:16-alpine
+    env:
+    - name: POSTGRES_USER
+      valueFrom: { secretKeyRef: { name: taskflow-ci-env, key: DB_USER } }
+    - name: POSTGRES_PASSWORD
+      valueFrom: { secretKeyRef: { name: taskflow-ci-env, key: DB_PASSWORD } }
+    - name: POSTGRES_DB
+      valueFrom: { secretKeyRef: { name: taskflow-ci-env, key: DB_NAME } }
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits: { memory: 512Mi }
+  - name: gitleaks
+    image: zricethezav/gitleaks:latest
+    command: ['cat']
+    tty: true
+    resources:
+      requests: { cpu: 100m, memory: 64Mi }
+      limits: { memory: 512Mi }
+  - name: semgrep
+    image: semgrep/semgrep:latest
+    command: ['cat']
+    tty: true
+    resources:
+      requests: { cpu: 200m, memory: 256Mi }
+      limits: { memory: 2Gi }
+  # syft, cosign and opa have shell-less images, so they are downloaded into a small alpine container.
+  - name: supplychain
+    image: alpine:3.20
+    command: ['cat']
+    tty: true
+    resources:
+      requests: { cpu: 100m, memory: 64Mi }
+      limits: { memory: 1Gi }
+  - name: sonar
+    image: sonarsource/sonar-scanner-cli:latest
+    command: ['cat']
+    tty: true
+    resources:
+      requests: { cpu: 200m, memory: 256Mi }
+      limits: { memory: 1536Mi }
+  - name: playwright
+    image: mcr.microsoft.com/playwright:v1.55.0-noble
+    command: ['cat']
+    tty: true
+    resources:
+      requests: { cpu: 200m, memory: 256Mi }
+      limits: { memory: 2Gi }
+  # Daemonless image build (no Docker socket inside Kubernetes).
+  - name: kaniko
+    image: gcr.io/kaniko-project/executor:debug
+    command: ['/busybox/cat']
+    tty: true
+    resources:
+      requests: { cpu: 200m, memory: 256Mi }
+      limits: { memory: 2Gi }
+  - name: trivy
+    image: aquasec/trivy:latest
+    command: ['cat']
+    tty: true
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits: { memory: 1Gi }
+  # kubectl + curl + jq: blue/green deploy, smoke test and the Prometheus health gate.
+  - name: kubectl
+    image: alpine/k8s:1.31.2
+    command: ['cat']
+    tty: true
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { memory: 256Mi }

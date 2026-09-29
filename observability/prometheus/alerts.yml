@@ -1,0 +1,52 @@
+# Pipeline SLO for taskflow-k8s
+#   SLI : share of finished builds that succeed (success / (success + failed))
+#   SLO : >= 90% over a rolling 30 min window (lab-sized; production would use 7d or 28d)
+#   Error budget : 10% of builds may fail
+# Counters used: default_jenkins_builds_{success,aborted,total}_build_count_total (the _total suffix
+# is optional in the selectors so older plugin versions also match). Aborted builds are excluded.
+groups:
+  - name: taskflow-pipeline-slo
+    rules:
+      - record: taskflow:builds_success:increase30m
+        expr: max(increase({__name__=~"default_jenkins_builds_success_build_count(_total)?", jenkins_job="taskflow-k8s"}[30m])) or vector(0)
+      - record: taskflow:builds_aborted:increase30m
+        expr: max(increase({__name__=~"default_jenkins_builds_aborted_build_count(_total)?", jenkins_job="taskflow-k8s"}[30m])) or vector(0)
+      - record: taskflow:builds_total:increase30m
+        expr: max(increase({__name__=~"default_jenkins_builds_total_build_count(_total)?", jenkins_job="taskflow-k8s"}[30m])) or vector(0)
+      # Failed (plus unstable/not-built) = total - success - aborted. Derived this way because the
+      # plugin only creates the failed counter after the first failure, and increase() ignores
+      # the first sample of a new series.
+      - record: taskflow:builds_failed:increase30m
+        expr: clamp_min(taskflow:builds_total:increase30m - taskflow:builds_success:increase30m - taskflow:builds_aborted:increase30m, 0)
+      - record: taskflow:build_success_ratio:30m
+        expr: taskflow:builds_success:increase30m / (taskflow:builds_success:increase30m + taskflow:builds_failed:increase30m)
+      - record: taskflow:error_budget_remaining:30m
+        expr: 1 - ((1 - taskflow:build_success_ratio:30m) / 0.10)
+
+      - alert: TaskflowPipelineSLOBreach
+        expr: |
+          taskflow:build_success_ratio:30m < 0.90
+          and (taskflow:builds_success:increase30m + taskflow:builds_failed:increase30m) >= 2
+        for: 1m
+        labels:
+          severity: page
+          slo: taskflow-pipeline-success-90
+        annotations:
+          summary: taskflow-k8s pipeline success ratio is below the 90% SLO
+          description: "Success ratio over 30m is {{ $value | humanizePercentage }}; the error budget is exhausted."
+
+      - alert: TaskflowPipelineLastBuildFailed
+        expr: max({__name__="default_jenkins_builds_last_build_result_ordinal", jenkins_job="taskflow-k8s"}) == 2
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: The latest taskflow-k8s build failed
+
+      - alert: JenkinsQueueBacklog
+        expr: max(jenkins_queue_size_value) > 2
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Jenkins build queue has {{ $value }} waiting items (agents not starting fast enough)"

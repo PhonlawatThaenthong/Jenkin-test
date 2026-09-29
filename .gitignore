@@ -7,3 +7,23 @@
 .claude/
 *.docx
 .env
+
+# Lab 06 security reports and signing key (never commit the private key)
+reports/
+policy/cosign.key
+
+# Lab 08: Terraform state/plans and the Ansible private key never go to git
+.terraform/
+*.tfstate
+*.tfstate.*
+infra/terraform/tfplan
+infra/terraform/tfplan.txt
+infra/ansible/ansible_ed25519
+
+# Lab 09: kubeconfig for the Jenkins Kubernetes cloud (never commit)
+*.kubeconfig
+
+# Lab 10: Android signing material (bound from Jenkins credentials, never committed)
+*.jks
+*.keystore
+key.properties

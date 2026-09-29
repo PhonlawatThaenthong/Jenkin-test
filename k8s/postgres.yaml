@@ -1,0 +1,44 @@
+# Throwaway Postgres for the lab cluster (emptyDir: data is lost when the pod restarts).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: taskflow-env
+type: Opaque
+stringData:
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_USER: poonsuk
+  DB_PASSWORD: poonsuk_k8s_password
+  DB_NAME: poonsuk
+  JWT_ACCESS_SECRET: k8s-lab-access-secret
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: postgres }
+  template:
+    metadata:
+      labels: { app: postgres }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - { name: POSTGRES_USER, value: poonsuk }
+            - { name: POSTGRES_PASSWORD, value: poonsuk_k8s_password }
+            - { name: POSTGRES_DB, value: poonsuk }
+          ports: [{ containerPort: 5432 }]
+          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql/data }]
+      volumes: [{ name: data, emptyDir: {} }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector: { app: postgres }
+  ports: [{ port: 5432, targetPort: 5432 }]

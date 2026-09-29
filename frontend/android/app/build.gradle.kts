@@ -25,11 +25,25 @@ android {
         versionName = flutter.versionName
     }
 
+    // Lab 10: the upload keystore is never committed. CI binds it from Jenkins credentials
+    // and passes its path and password as environment variables; locally (no variables)
+    // release builds fall back to the debug key so `flutter run --release` still works.
+    val releaseKeystore = System.getenv("ANDROID_KEYSTORE_PATH")
+    signingConfigs {
+        create("release") {
+            if (releaseKeystore != null) {
+                storeFile = file(releaseKeystore)
+                storePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ANDROID_KEY_ALIAS") ?: "upload"
+                keyPassword = System.getenv("ANDROID_KEY_PASSWORD") ?: System.getenv("ANDROID_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (releaseKeystore != null) signingConfigs.getByName("release")
+                            else signingConfigs.getByName("debug")
         }
     }
 }

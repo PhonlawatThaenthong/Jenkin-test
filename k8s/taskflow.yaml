@@ -1,0 +1,74 @@
+# Blue/green for taskflow-api (Lab 07).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskflow-blue
+  labels: { app: taskflow, color: blue }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: taskflow, color: blue }
+  template:
+    metadata:
+      labels: { app: taskflow, color: blue }
+    spec:
+      containers:
+        - name: app                       # the pipeline runs: kubectl set image ... app=<tag>
+          image: localhost:5001/taskflow-api:bootstrap
+          envFrom: [{ secretRef: { name: taskflow-env } }]
+          ports: [{ containerPort: 3000 }]
+          readinessProbe:
+            httpGet: { path: /health/live, port: 3000 }
+            initialDelaySeconds: 3
+            periodSeconds: 3
+---
+# Per-colour Service: lets the smoke test reach the new pods before any user traffic does.
+apiVersion: v1
+kind: Service
+metadata:
+  name: taskflow-blue
+spec:
+  selector: { app: taskflow, color: blue }
+  ports: [{ port: 8080, targetPort: 3000 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskflow-green
+  labels: { app: taskflow, color: green }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: taskflow, color: green }
+  template:
+    metadata:
+      labels: { app: taskflow, color: green }
+    spec:
+      containers:
+        - name: app                       # the pipeline runs: kubectl set image ... app=<tag>
+          image: localhost:5001/taskflow-api:bootstrap
+          envFrom: [{ secretRef: { name: taskflow-env } }]
+          ports: [{ containerPort: 3000 }]
+          readinessProbe:
+            httpGet: { path: /health/live, port: 3000 }
+            initialDelaySeconds: 3
+            periodSeconds: 3
+---
+# Per-colour Service: lets the smoke test reach the new pods before any user traffic does.
+apiVersion: v1
+kind: Service
+metadata:
+  name: taskflow-green
+spec:
+  selector: { app: taskflow, color: green }
+  ports: [{ port: 8080, targetPort: 3000 }]
+---
+# The one Service users hit. Switching colour = patching spec.selector.color.
+apiVersion: v1
+kind: Service
+metadata:
+  name: taskflow
+spec:
+  selector: { app: taskflow, color: blue }
+  ports: [{ port: 8080, targetPort: 3000 }]

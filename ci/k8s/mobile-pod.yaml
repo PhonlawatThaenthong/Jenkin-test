@@ -1,0 +1,28 @@
+# Lab 10: ephemeral pod for taskflow-mobile (Flutter/Android) builds.
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: taskflow-mobile-ci
+spec:
+  containers:
+  - name: flutter
+    # :stable is a moving tag. Without Always, the kind node keeps whatever copy it pulled first
+    # (Flutter 3.44 / Dart 3.12.0), which cannot satisfy pubspec's sdk ^3.12.2.
+    image: ghcr.io/cirruslabs/flutter:stable
+    imagePullPolicy: Always
+    command: ['cat']
+    tty: true
+    env:
+    - name: GRADLE_OPTS
+      value: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx2g
+    resources:
+      requests: { cpu: 1000m, memory: 2Gi }
+      limits: { memory: 6Gi }
+  - name: tools
+    image: alpine:3.20
+    command: ['cat']
+    tty: true
+    resources:
+      requests: { cpu: 50m, memory: 64Mi }
+      limits: { memory: 512Mi }

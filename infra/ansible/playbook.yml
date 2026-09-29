@@ -1,0 +1,31 @@
+---
+- name: Configure the taskflow-api host
+  hosts: taskflow
+  become: true
+  vars:
+    taskflow_image: "{{ lookup('ansible.builtin.env', 'IMAGE', default='localhost:5001/taskflow-api:bootstrap') }}"
+
+  tasks:
+    - name: Install Node.js, Docker and the Docker SDK for Python
+      ansible.builtin.apt:
+        name:
+          - nodejs
+          - docker.io
+          - python3-docker
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Read the installed Node.js version
+      ansible.builtin.command: node --version
+      register: taskflow_node_version
+      changed_when: false
+
+    - name: Show the Node.js version
+      ansible.builtin.debug:
+        msg: "Node.js {{ taskflow_node_version.stdout }} is installed"
+
+    - name: Pull the taskflow-api image built in Lab 07
+      community.docker.docker_image:
+        name: "{{ taskflow_image }}"
+        source: pull
